@@ -23,7 +23,7 @@ Built with **Supabase (PostgreSQL + Auth + Row Level Security)** and a **respons
 | Generate + display event QR code | — | ✅ | ✅ |
 | View attendance records | — | ✅ (own events) | ✅ (all) |
 | Attendance summaries | — | ✅ | ✅ |
-| Manage users (roles, activation) | — | — | ✅ |
+| Manage users (roles, activation, personal + educational details) | — | — | ✅ |
 | Correct / delete attendance records | — | ✅ (own events) | ✅ |
 | System activity log / reports | — | — | ✅ |
 
@@ -54,7 +54,7 @@ school-qr-attendance/
 ├── supabase-config.js         YOUR real credentials (git-ignored)
 ├── .gitignore                 Ignores secrets / node_modules
 ├── README.md
-├── SUPABASE_SQL.md            Copy-paste mirror of sql/10 + verify queries
+├── SUPABASE_SQL.md            Copy-paste mirror of sql/10 + the sql/11 CRUD fix + verify queries
 ├── sql/
 │   ├── 01_schema.sql          Tables, enums, signup trigger, education columns + grants
 │   ├── 02_functions.sql       Helpers, check_in() RPC, admin RPCs, audit trigger
@@ -65,7 +65,8 @@ school-qr-attendance/
 │   ├── 07_security_hardening.sql  Column-level grants + RLS WITH CHECK defence
 │   ├── 08_admin_delete_user.sql   Admin-only delete RPC
 │   ├── 09_registration_student_no.sql  Signup trigger variant (superseded by 10)
-│   └── 10_education_levels.sql  Educational level, course, year, block, section
+│   ├── 10_education_levels.sql  Educational level, course, year, block, section
+│   └── 11_crud_policies.sql   Re-applies every RLS policy + grant the app needs (Manage Users CRUD fix)
 └── js/
     ├── supabaseClient.js      Creates the Supabase client from the config
     ├── ui.js                  Toasts, loading/empty states, escaping, formatting
@@ -122,10 +123,42 @@ typed by hand:
 - `department` ← mirrors `course`
 - `grade_class` ← `formatGradeClass()`, e.g. `Year 3 · Block A` or `Grade 11 · Section B`
 
-`grade_class` exists because the Manage Users table and the CSV reports render a
-"Grade/Class" column. Regenerate it through `formatGradeClass()` so it can never
-drift from the structured columns. `role` and `is_active` are never sent from
-the browser — the signup trigger hardcodes `role = 'student'`.
+`grade_class` exists because the CSV reports render a "Grade/Class" column, and
+because the Manage Users table falls back to it — through `parseGradeClass()` —
+for accounts whose structured columns are still empty. Regenerate it through
+`formatGradeClass()` so it can never drift from the structured columns. `role`
+and `is_active` are never sent from the browser — the signup trigger hardcodes
+`role = 'student'`.
+
+The Manage Users **Details** column renders one labelled line per field, chosen
+by the row's `educational_level` (`renderUserDetails()` in `js/admin.js`):
+
+| Educational Level | Details column |
+|---|---|
+| College | Student ID · Course · Year Level (1st–4th Year) · Block |
+| Senior High School | Student ID · Track · Grade Level (Grade 11–12) · Section |
+| Junior High School | Student ID · Grade Level · Section |
+| Elementary | Student ID · Grade Level · Section |
+
+**Editing a user** (Manage Users → *Edit*) writes both halves of a row: the
+*Personal Information* block (full name, phone, School ID Number, title — the
+sign-in **email is read-only** because it lives in Supabase Auth and is outside
+the column-level `grant update`) and the *Educational Information* block. The
+save is validated with the same `validateLevelFields()` / `validatePhone()`
+rules as registration. The `UPDATE` response itself is **not** trusted —
+PostgREST answers "no content" for a write that succeeded, while an RLS-blocked
+write answers success with zero rows — so the row is reloaded and compared
+against what was submitted: a save that landed is always reported as success
+(whichever columns changed), and one that did not names exactly which fields the
+database refused. Then:
+
+1. reloads and re-renders the **Manage Users** table immediately;
+2. reaches every other open session through the `profiles` realtime event, so
+   the edited user's **Profile → Personal Information** and **Education Level /
+   Information** card update live;
+3. when an administrator edits **their own** row, the realtime echo is
+   suppressed on that client, so `applyLocalProfileUpdate()` (js/app.js)
+   patches the session copy directly.
 
 Key integrity rules:
 - `UNIQUE (event_id, student_id)` on `attendance` → **database-level duplicate prevention**.
@@ -152,7 +185,9 @@ Open **SQL Editor** in the dashboard and run these files **in order**:
 | 5 | `sql/05_realtime.sql` | *Optional* – live attendance, event, profile & audit updates |
 | 6 | `sql/06_backfill_profiles.sql` | *If* an account has no profile row (created before the trigger existed) |
 | 7 | `sql/07_security_hardening.sql` | Column-level UPDATE grants + RLS `WITH CHECK` |
-| 8 | `sql/10_education_levels.sql` | **Educational level/course/year/block/section columns + backfill** |
+| 8 | `sql/08_admin_delete_user.sql` | Admin-only account-deletion RPC |
+| 9 | `sql/10_education_levels.sql` | **Educational level/course/year/block/section columns + backfill** |
+| 10 | `sql/11_crud_policies.sql` | **Re-applies every RLS policy + grant — run last; fixes "Save blocked - kept the old value"** |
 
 > Each file is safe to re-run.
 >
@@ -311,6 +346,7 @@ The interface is responsive (mobile, tablet and desktop), consistent, and uses o
 | Login says *Invalid login credentials* | Check the email/password, and make sure the user was created and confirmed in Supabase → Authentication → Users. |
 | Registration asks you to confirm your email | Turn off **Confirm email** in Authentication → Providers → Email. |
 | Saving the profile says *permission denied for table profiles* | You have not run `sql/10_education_levels.sql` (or an older `09` re-ran after it). The new columns are missing from the column-level `grant update`. Run `10` again. |
+| Manage Users → Save says *the database kept the old value for: …* | The write was filtered out by RLS, so nothing changed. Run `sql/07_security_hardening.sql` **then** `sql/10_education_levels.sql`, and confirm with:<br>`select policyname from pg_policies where schemaname='public' and tablename='profiles';` (needs `profiles_admin_all`)<br>`select public.is_admin();` while signed in (must be `t`) |
 | A student's Grade/Block/Section is empty on their profile | The signup trigger must be the current one. `01`, `07` and `10` all define `handle_new_user()`; run **`10` last** so the newest definition wins. |
 | Old accounts show Educational Level as *N/A* | `10` only classifies rows it can infer from `department` / `grade_class`. Set the rest through **Admin → Manage Users → Edit**. |
 | The scanner will not start the camera | Run the app on `localhost` or over HTTPS and allow camera permission. A manual “event code” entry box is provided as a fallback. |

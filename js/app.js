@@ -12,7 +12,7 @@ import { initGlobalRealtime } from './realtime.js';
 import {
   COURSES, YEARS, BLOCKS, labelForLevel, courseLabel, yearLabel,
   fillSelect, ensureOption, applyLevelFields, readLevelFields,
-  validateLevelFields, fieldsForLevel, formatGradeClass
+  validateLevelFields, fieldsForLevel, formatGradeClass, parseGradeClass
 } from './education.js';
 
 let profile = null;
@@ -136,6 +136,7 @@ async function bootstrap() {
           return;
         }
         profile = { ...profile, ...updated };
+        Admin.initAdmin(profile);   // admin.js holds its own reference to the row
         renderHeader();
         if (activeTab === 'profile') fillProfileForm();
       }
@@ -543,35 +544,6 @@ function renderProfileFormLevelFields() {
 }
 
 /**
- * Recover year / block / section from the denormalised `grade_class`.
- *
- * The legacy backfill in sql/01 only writes `educational_level`, so rows that
- * predate sql/10_education_levels.sql still carry their data solely in
- * `grade_class`. Both shapes are handled: the ones formatGradeClass()
- * produces ("Year 3 · Block A", "Grade 11 · Section A") and the older
- * free-text "Grade 11-A".
- *
- * @returns {{year: string, block: string, section: string}}
- */
-function parseGradeClass(value) {
-  const gc = String(value || '').trim();
-  const out = { year: '', block: '', section: '' };
-  if (!gc) return out;
-
-  const yr = gc.match(/^\s*(?:year|grade)\s+(\d+)/i);
-  if (yr) out.year = yr[1];
-
-  const blk = gc.match(/\bblock\s+(\S+)/i);
-  if (blk) out.block = blk[1];
-
-  const sec = gc.match(/\bsection\s+(.+)$/i)
-           || gc.match(/^\s*(?:year|grade)\s+\d+\s*-\s*(.+)$/i);
-  if (sec) out.section = sec[1].trim();
-
-  return out;
-}
-
-/**
  * Fill the read-only education card on a student's profile.
  *
  * WHICH rows appear is decided by fieldsForLevel() - the same rule the
@@ -645,10 +617,13 @@ function fillProfileForm() {
     : 'View and update your personal information.';
   if (isStudent) {
     const ro = (id, val) => { const el = document.getElementById(id); if (el) el.value = val || 'N/A'; };
+    const tx = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || 'N/A'; };
     ro('full-name-input', profile.full_name);
     ro('email-input', profile.email);
     ro('phone-input', profile.phone);
     ro('student-number-input', profile.student_no);
+    tx('student-card-name', profile.full_name);
+    tx('student-card-id', profile.student_no);
     renderProfileEducation();
     renderProfileStats();
     return;
@@ -736,6 +711,26 @@ async function saveProfile(e) {
   renderHeader();
   fillProfileForm();
   toast('Profile updated successfully.', 'success');
+}
+
+/**
+ * Merge a profile patch saved somewhere else into the signed-in user's session
+ * copy and refresh the header + Profile tab.
+ *
+ * js/admin.js calls this when an administrator saves their OWN row from
+ * Manage Users: that write suppresses its realtime echo (so the users table
+ * does not double-refresh), which would otherwise leave the header and the
+ * Profile page's Personal / Educational Information stale until a reload.
+ * Changes made to *other* users travel to their clients through the profiles
+ * realtime event handled in bootstrap().
+ *
+ * @param {object} patch the columns that were just written to public.profiles
+ */
+export function applyLocalProfileUpdate(patch) {
+  profile = { ...profile, ...patch };
+  Admin.initAdmin(profile);   // keep admin.js's copy (role / id) in step too
+  renderHeader();
+  if (activeTab === 'profile') fillProfileForm();
 }
 
 

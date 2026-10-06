@@ -134,7 +134,7 @@
       </div>
 
       <!-- Form panel (hidden until a portal is picked; keeps original IDs so auth logic is untouched) -->
-      <div id="auth-panel" class="hidden bg-white rounded-3xl shadow-xl overflow-hidden mt-6">
+      <div id="auth-panel" class="hidden bg-white rounded-3xl shadow-xl overflow-hidden mt-6 w-full max-w-md mx-auto">
         <div class="relative flex items-center justify-center px-6 pt-4">
           <button id="back-to-portals" type="button" class="absolute left-6 text-xs font-semibold text-indigo-600 hover:text-indigo-800 transition">
             <i class="fa-solid fa-arrow-left mr-1"></i>Back to portals
@@ -167,6 +167,10 @@
           <button type="submit" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-semibold hover:bg-indigo-700 transition">
             <i class="fa-solid fa-right-to-bracket mr-2"></i>Login
           </button>
+          <p id="link-to-register-wrap" class="text-center text-sm text-slate-500">
+            Don't have an account?
+            <button id="link-to-register" type="button" class="font-semibold text-indigo-600 hover:text-indigo-800 hover:underline">Register</button>
+          </p>
         </form>
 
         <!-- Register Form -->
@@ -259,6 +263,10 @@
           <button type="submit" class="w-full bg-indigo-600 text-white py-2.5 rounded-lg font-semibold hover:bg-indigo-700 transition">
             <i class="fa-solid fa-user-plus mr-2"></i>Register
           </button>
+          <p class="text-center text-sm text-slate-500">
+            Already have an account?
+            <button id="link-to-login" type="button" class="font-semibold text-indigo-600 hover:text-indigo-800 hover:underline">Log in</button>
+          </p>
           <p class="text-xs text-slate-500">New accounts register as <b>students</b> automatically.</p>
         </form>
 

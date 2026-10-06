@@ -18,7 +18,7 @@
 -- live trigger is still the old two-column one.
 --
 -- Fresh install order: 01 -> 02 -> 03 -> 04 -> 05 (optional) -> 06 ->
---                       07 -> 08 -> 10   (09 is superseded by 10)
+--                       07 -> 08 -> 10 -> 11   (09 is superseded by 10)
 -- Existing database:   10 only.
 --
 -- WHY THIS FILE EXISTS

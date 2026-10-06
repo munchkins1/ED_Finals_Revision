@@ -84,6 +84,9 @@ function wireTabs() {
   };
   loginTab.addEventListener('click', () => show('login'));
   regTab.addEventListener('click', () => show('register'));
+  // In-form cross-links below the submit buttons (same toggle, tabs stay in sync).
+  document.getElementById('link-to-register')?.addEventListener('click', () => show('register'));
+  document.getElementById('link-to-login')?.addEventListener('click', () => show('login'));
   wirePortals(show);
 }
 
@@ -104,6 +107,8 @@ function wirePortals(show) {
     if (note) note.classList.toggle('hidden', !isPersonnel);
     // Personnel: hide the Register tab so only Login is reachable.
     if (regTab) regTab.style.display = isPersonnel ? 'none' : '';
+    // Personnel is login-only: hide the in-form "Don't have an account?" link too.
+    document.getElementById('link-to-register-wrap')?.classList.toggle('hidden', isPersonnel);
     show(isPersonnel ? 'login' : which);
     panel.classList.remove('hidden');
     chooser.classList.add('hidden');

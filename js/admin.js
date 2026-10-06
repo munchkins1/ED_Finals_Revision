@@ -4,15 +4,32 @@
 // into, the shared student/teacher tabs (events.js / attendance.js).
 import { supabase } from './supabaseClient.js';
 import { $, esc, toast, tableMessage, statusBadge, fmtDateTime } from './ui.js';
-import { suppressRealtime, realtimeSuppressed } from './app.js';
+import { suppressRealtime, realtimeSuppressed, applyLocalProfileUpdate } from './app.js';
 import {
   COURSES, YEARS, BLOCKS, courseLabel, yearLabel,
-  fillSelect, ensureOption, applyLevelFields, readLevelFields, formatGradeClass
+  fillSelect, ensureOption, applyLevelFields, readLevelFields,
+  formatGradeClass, parseGradeClass, validateLevelFields, validatePhone
 } from './education.js';
 
 let profile = null;
 let users = [];
 const STATUS_OPTIONS = ['present', 'late', 'absent', 'excused'];
+
+/* Columns saveUserProfile() submits, plus the labels used when the database
+ * refuses to write them. Also the set compared against the reloaded row. */
+const PROFILE_FIELDS = [
+  'full_name', 'phone', 'student_no', 'title',
+  'educational_level', 'course', 'year_level', 'block', 'section',
+  'department', 'grade_class'
+];
+const PROFILE_FIELD_LABELS = {
+  full_name: 'Full name', phone: 'Phone', student_no: 'School ID', title: 'Title',
+  educational_level: 'Educational Level', course: 'Course / Track',
+  year_level: 'Year / Grade Level', block: 'Block', section: 'Section',
+  department: 'Department', grade_class: 'Grade / Class'
+};
+/** The database and the payload can disagree on null vs '' and 3 vs '3'. */
+const norm = v => (v === null || v === undefined) ? '' : String(v);
 
 export function initAdmin(p) { profile = p; }
 
@@ -39,9 +56,10 @@ export async function loadUsers({ silent = false } = {}) {
     if (tbody) tableMessage(tbody, 5, 'Could not load users.', 'error');
     toast('Could not load users: ' + error.message, 'error');
     users = [];
-    return;
+    return false;
   }
   users = data || [];
+  return true;
 }
 
 function roleBadge(role) {
@@ -51,6 +69,93 @@ function roleBadge(role) {
     student: 'bg-slate-100 text-slate-700'
   };
   return `<span class="px-2.5 py-1 rounded-full text-xs font-semibold ${map[role] || ''}">${esc(role)}</span>`;
+}
+
+/* ---------- Manage Users → "Details" column ----------
+ * One row per field, in the format the registrar asked for:
+ *   College            -> Student ID, Course, Year Level (1st–4th Year), Block
+ *   Senior High School -> Student ID, Track, Grade Level (11–12), Section
+ *   Junior High School -> Student ID, Grade Level, Section
+ *   Elementary         -> Student ID, Grade Level, Section
+ *
+ * Accounts created before sql/10_education_levels.sql have no stored
+ * `educational_level`, so the level is inferred and the values are recovered
+ * from the denormalised `grade_class` through parseGradeClass(). A row with
+ * nothing education-related at all (staff accounts) only prints Student ID. */
+
+/** College: "1" → "1st Year". School levels: "11" → "Grade 11". */
+function formatYearOrGrade(level, raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return '';
+  if (level !== 'college') return `Grade ${digits}`;
+  const n = parseInt(digits, 10);
+  const suffix = (n % 100 >= 11 && n % 100 <= 13) ? 'th'
+    : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th');
+  return `${n}${suffix} Year`;
+}
+
+/**
+ * The stored level, or a best-effort guess for accounts that predate
+ * sql/10_education_levels.sql (whose `department` / `grade_class` still hold
+ * legacy free text such as "College Department" or "Grade 11-A").
+ * @returns {'college'|'senior_high'|'junior_high'|'elementary'|''}
+ */
+function inferEducationalLevel(u) {
+  if (u.educational_level) return u.educational_level;
+  const dept  = String(u.course || u.department || '').trim();
+  const grade = String(u.grade_class || '').trim();
+
+  if (u.block || /^year\b/i.test(grade) || /college/i.test(dept) ||
+      (COURSES.college || []).includes(dept)) return 'college';
+  if (/senior/i.test(dept))  return 'senior_high';
+  if (/junior/i.test(dept))  return 'junior_high';
+  if (/element|kindergarten/i.test(dept)) return 'elementary';
+
+  let n = parseInt(String(u.year_level || '').replace(/\D/g, ''), 10);
+  if (!n) { const m = grade.match(/grade\s+(\d+)/i); n = m ? parseInt(m[1], 10) : 0; }
+  if (n >= 11 && n <= 12) return 'senior_high';
+  if (n >= 7  && n <= 10) return 'junior_high';
+  if (n >= 1  && n <= 6)  return 'elementary';
+  return '';
+}
+
+/** Build the labelled Student ID / Course / Year / Block ... block for one row. */
+function renderUserDetails(u) {
+  const level  = inferEducationalLevel(u);
+  const parsed = parseGradeClass(u.grade_class);
+  const set    = v => String(v || '').trim() || 'Not set';
+  const year   = String(u.year_level || parsed.year || '').trim();
+  // `department` mirrors `course` on modern rows, but legacy accounts store
+  // free text there ("College Department" / "Senior High"), so it is only
+  // trusted when it is a real course/track for this level.
+  const rawCourse = String(u.course || u.department || '').trim();
+  const course = u.course || ((COURSES[level] || []).includes(rawCourse) ? rawCourse : '');
+
+  const rows = [['Student ID', set(u.student_no)]];
+
+  if (level === 'college') {
+    rows.push(['Course',      set(course)]);
+    rows.push(['Year Level',  year ? formatYearOrGrade(level, year) : 'Not set']);
+    rows.push(['Block',       set(u.block || parsed.block)]);
+  } else if (level === 'senior_high') {
+    rows.push(['Track',       set(course)]);
+    rows.push(['Grade Level', year ? formatYearOrGrade(level, year) : 'Not set']);
+    rows.push(['Section',     set(u.section || parsed.section)]);
+  } else if (level === 'junior_high' || level === 'elementary') {
+    rows.push(['Grade Level', year ? formatYearOrGrade(level, year) : 'Not set']);
+    rows.push(['Section',     set(u.section || parsed.section)]);
+  } else if (u.grade_class || u.department) {
+    // Level still unknown (an old account an admin has not classified yet):
+    // show what is stored instead of inventing labels.
+    if (u.grade_class) rows.push(['Grade / Class', u.grade_class]);
+    if (u.department)  rows.push(['Department',    u.department]);
+  }
+
+  return `<div class="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs">
+    ${rows.map(([label, value]) => `
+      <div class="text-slate-400 font-semibold whitespace-nowrap">${esc(label)}</div>
+      <div class="text-slate-700 font-medium break-words">${esc(value)}</div>`).join('')}
+  </div>`;
 }
 
 export function renderUsers() {
@@ -78,10 +183,7 @@ export function renderUsers() {
           <div class="font-semibold">${esc(u.full_name || '(no name)')}</div>
           <div class="text-xs text-slate-500">${esc(u.email)}</div>
         </td>
-        <td class="p-4 text-sm text-slate-600">
-          ${esc(u.student_no || '-')}${u.grade_class ? ` Â· ${esc(u.grade_class)}` : ''}
-          ${u.department ? `<div class="text-xs text-slate-400">${esc(u.department)}</div>` : ''}
-        </td>
+        <td class="p-4">${renderUserDetails(u)}</td>
         <td class="p-4">${roleBadge(u.role)}</td>
         <td class="p-4">
           ${u.is_active
@@ -154,6 +256,9 @@ export function openEditUser(id) {
   $('#modal-user-phone').value = u.phone || '';
   $('#modal-user-studentno').value = u.student_no || '';
   $('#modal-user-title').value = u.title || '';
+  // Sign-in address: shown for identification, never submitted (see the modal
+  // comment - it is outside the column-level UPDATE grant on purpose).
+  $('#modal-user-email').value = u.email || '';
 
   // Rebuild the option lists for this level BEFORE restoring the values, so
   // ensureOption() has a full list to check against.
@@ -183,13 +288,28 @@ export async function saveUserProfile(e) {
   e.preventDefault();
   const edu = readLevelFields(e.target);
 
+  // ---- personal information validation (same rules as registration/profile)
+  const fullName = $('#modal-user-name').value.trim();
+  if (!fullName) { toast('Please enter the user\'s full name.', 'error'); return; }
+
+  const phone = $('#modal-user-phone').value.trim();
+  const phoneError = validatePhone(phone);
+  if (phoneError) { toast(phoneError, 'error'); return; }
+
+  // Choosing "Not set" clears the whole education group (applyLevelFields()
+  // disables every dependent control, so readLevelFields() reads nulls) and is
+  // allowed. When a level IS chosen, it has to be complete - the same
+  // validateLevelFields() rule the registration form and profile use.
+  if (edu.educational_level) {
+    const eduError = validateLevelFields(edu);
+    if (eduError) { toast(eduError, 'error'); return; }
+  }
+
   const payload = {
-    full_name: $('#modal-user-name').value.trim(),
-    phone: $('#modal-user-phone').value.trim(),
+    full_name: fullName,
+    phone,
     student_no: $('#modal-user-studentno').value.trim() || null,
     title: $('#modal-user-title').value.trim() || null,
-    // Choosing "Not set" clears the whole group, because applyLevelFields()
-    // disables every dependent control when the level is empty.
     educational_level: edu.educational_level,
     course:            edu.course,
     year_level:        edu.year_level,
@@ -200,12 +320,50 @@ export async function saveUserProfile(e) {
     department: edu.course || null,
     grade_class: formatGradeClass(edu.educational_level, edu.year_level, edu.block, edu.section) || null
   };
-  const { error } = await supabase.from('profiles').update(payload).eq('id', editId);
-  if (error) { toast('Could not save user: ' + error.message, 'error'); return; }
+
+  // PostgREST may answer an UPDATE with an empty body ("no content") even when
+  // the write succeeded, while an RLS-blocked write answers with success and
+  // zero rows. Neither response shape can prove anything on its own, so the
+  // saved ROW is the source of truth: reload it and compare what was actually
+  // submitted. A save that landed is therefore never reported as blocked - no
+  // matter which columns were changed - and one that did not names exactly
+  // which fields the database refused.
+  const { error } = await supabase
+    .from('profiles').update(payload).eq('id', editId).select('id');
+  if (error) { console.error('saveUserProfile', error); toast('Could not save user: ' + error.message, 'error'); return; }
+
   suppressRealtime(); // ignore this change's realtime echo
+
+  const loaded = await loadUsers();
+  const row = loaded ? users.find(u => u.id === editId) : null;
+
+  if (loaded && !row) {
+    renderUsers();
+    toast('Save blocked - that account no longer exists. The list has been refreshed.', 'error');
+    return;
+  }
+  const refused = row ? PROFILE_FIELDS.filter(k => norm(row[k]) !== norm(payload[k])) : [];
+  if (refused.length) {
+    renderUsers();
+    toast('Save blocked - the database kept the old value for: ' +
+      refused.map(k => PROFILE_FIELD_LABELS[k]).join(', ') +
+      '. Nothing was written. Usual cause: the UPDATE policies/grants on public.profiles are out of date - run the "Fix: Save blocked" SQL in SUPABASE_SQL.md (sql/11_crud_policies.sql).', 'error');
+    return;
+  }
+
   toast('User profile updated.', 'success');
   closeEditUser();
-  await loadUsers(); renderUsers();
+
+  // Manage Users already holds the reloaded rows - render the new details now.
+  renderUsers();
+
+  // Editing your OWN row: the realtime echo is suppressed on this client, so
+  // patch the session copy here - the header and the Profile tab's Personal /
+  // Educational Information refresh immediately instead of on the next reload.
+  // Other users' clients pick the change up through the profiles realtime
+  // event (see the dispatcher in js/app.js).
+  if (editId && editId === profile?.id) applyLocalProfileUpdate(payload);
+
   renderAdminOverview();
 }
 

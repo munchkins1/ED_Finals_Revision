@@ -82,6 +82,39 @@ export function formatGradeClass(level, yearLevel, block, section) {
   return [year && `Grade ${year}`, sec && `Section ${sec}`].filter(Boolean).join(' · ');
 }
 
+/**
+ * Recover year / block / section from the denormalised `grade_class` — the
+ * counterpart of formatGradeClass().
+ *
+ * The legacy backfill in sql/01 only writes `educational_level`, so rows that
+ * predate sql/10_education_levels.sql still carry their data solely in
+ * `grade_class`. Both shapes are handled: the ones formatGradeClass()
+ * produces ("Year 3 · Block A", "Grade 11 · Section A") and the older
+ * free-text "Grade 11-A".
+ *
+ * Used by the profile card (js/app.js) and the Manage Users "Details" column
+ * (js/admin.js) so migrated accounts still show their year/block/section.
+ *
+ * @returns {{year: string, block: string, section: string}}
+ */
+export function parseGradeClass(value) {
+  const gc = String(value || '').trim();
+  const out = { year: '', block: '', section: '' };
+  if (!gc) return out;
+
+  const yr = gc.match(/^\s*(?:year|grade)\s+(\d+)/i);
+  if (yr) out.year = yr[1];
+
+  const blk = gc.match(/\bblock\s+(\S+)/i);
+  if (blk) out.block = blk[1];
+
+  const sec = gc.match(/\bsection\s+(.+)$/i)
+           || gc.match(/^\s*(?:year|grade)\s+\d+\s*-\s*(.+)$/i);
+  if (sec) out.section = sec[1].trim();
+
+  return out;
+}
+
 /** Repopulate a <select> from an option list, optionally preserving the value. */
 export function fillSelect(select, options, { placeholder = 'Select...', keep = false } = {}) {
   if (!select) return;
